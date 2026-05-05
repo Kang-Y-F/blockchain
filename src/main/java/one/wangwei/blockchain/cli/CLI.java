@@ -17,10 +17,12 @@ import org.apache.commons.cli.*;
 import org.apache.commons.codec.binary.Hex;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.math.NumberUtils;
+import one.wangwei.blockchain.transaction.MerkleTree;
+
 
 import java.util.Arrays;
 import java.util.Set;
-
+import java.util.List;
 /**
  * 命令行解析器
  *
@@ -46,12 +48,17 @@ public class CLI {
 
         // 新增：矿工地址参数
         Option miner = Option.builder("miner").hasArg(true).desc("Miner wallet address").build();
+        Option block = Option.builder("block").hasArg(true).desc("Block hash").build();
+        Option txid = Option.builder("txid").hasArg(true).desc("Transaction id").build();
 
         options.addOption(address);
         options.addOption(sendFrom);
         options.addOption(sendTo);
         options.addOption(sendAmount);
         options.addOption(miner);
+        options.addOption(block);
+        options.addOption(txid);
+
     }
 
     /**
@@ -102,6 +109,18 @@ public class CLI {
                     }
                     this.mine(minerAddress);
                     break;
+
+                case "verifytx":
+                    String blockHash = cmd.getOptionValue("block");
+                    String txId = cmd.getOptionValue("txid");
+
+                    if (StringUtils.isBlank(blockHash) || StringUtils.isBlank(txId)) {
+                        help();
+                    }
+
+                    this.verifyTx(blockHash, txId);
+                    break;
+
 
                 // 新增：打印交易池
                 case "printmempool":
@@ -441,6 +460,7 @@ public class CLI {
         System.out.println("  mine -miner ADDRESS - Mine pending transactions from mempool and reward miner");
         System.out.println("  printmempool - Print all pending transactions in mempool");
         System.out.println("  clearmempool - Clear all pending transactions in mempool");
+        System.out.println("  verifytx -block BLOCK_HASH -txid TX_ID - Verify transaction existence by Merkle Proof");
 
         System.exit(0);
     }
@@ -460,6 +480,89 @@ public class CLI {
     }
 
     /**
+     * 验证某笔交易是否存在于指定区块中，并验证Merkle Proof
+     *
+     * @param blockHash 区块Hash
+     * @param txIdHex   交易ID
+     */
+    private void verifyTx(String blockHash, String txIdHex) {
+        Blockchain blockchain = Blockchain.initBlockchainFromDB();
+
+        Block targetBlock = null;
+
+        for (Blockchain.BlockchainIterator iterator = blockchain.getBlockchainIterator(); iterator.hashNext(); ) {
+            Block block = iterator.next();
+
+            if (block != null && block.getHash().equalsIgnoreCase(blockHash)) {
+                targetBlock = block;
+                break;
+            }
+        }
+
+        if (targetBlock == null) {
+            log.error("ERROR: Block not found ! blockHash={}", blockHash);
+            return;
+        }
+
+        Transaction targetTx = null;
+
+        for (Transaction tx : targetBlock.getTransactions()) {
+            String currentTxId = Hex.encodeHexString(tx.getTxId());
+
+            if (currentTxId.equalsIgnoreCase(txIdHex)) {
+                targetTx = tx;
+                break;
+            }
+        }
+
+        if (targetTx == null) {
+            log.error("ERROR: Transaction not found in block ! txId={}", txIdHex);
+            return;
+        }
+
+        byte[][] txHashes = new byte[targetBlock.getTransactions().length][];
+
+        for (int i = 0; i < targetBlock.getTransactions().length; i++) {
+            txHashes[i] = targetBlock.getTransactions()[i].hash();
+        }
+
+        MerkleTree merkleTree = new MerkleTree(txHashes);
+
+        byte[] targetTxHash = targetTx.hash();
+        byte[] merkleRoot = merkleTree.getRootHash();
+
+        List<MerkleTree.ProofNode> proof = merkleTree.getProof(targetTxHash);
+
+        boolean proofValid = MerkleTree.verifyProof(targetTxHash, proof, merkleRoot);
+
+        System.out.println("==================================================");
+        System.out.println("Merkle Transaction Verification");
+        System.out.println("==================================================");
+        System.out.println("Block Hash:      " + targetBlock.getHash());
+        System.out.println("TX ID:           " + Hex.encodeHexString(targetTx.getTxId()));
+        System.out.println("TX Hash:         " + Hex.encodeHexString(targetTxHash));
+        System.out.println("Merkle Root:     " + Hex.encodeHexString(merkleRoot));
+        System.out.println("Proof Nodes:     " + proof.size());
+
+        for (int i = 0; i < proof.size(); i++) {
+            MerkleTree.ProofNode proofNode = proof.get(i);
+
+            System.out.println("  Proof Node #" + i);
+            System.out.println("    Hash:        " + Hex.encodeHexString(proofNode.getHash()));
+            System.out.println("    Position:    " + (proofNode.isLeftSibling() ? "LEFT" : "RIGHT"));
+        }
+
+        System.out.println("Proof Valid:     " + proofValid);
+
+        if (proofValid) {
+            System.out.println("Result:          Transaction exists in this block.");
+        } else {
+            System.out.println("Result:          Transaction proof invalid.");
+        }
+    }
+
+
+    /**
      * 结构化打印区块
      *
      * @param block
@@ -473,6 +576,7 @@ public class CLI {
         System.out.println("Timestamp:       " + block.getTimeStamp());
         System.out.println("Nonce:           " + block.getNonce());
         System.out.println("POW Valid:       " + validate);
+        System.out.println("Merkle Root:     " + block.getMerkleRootHex());
         System.out.println("Transactions:    " + block.getTransactions().length);
 
         for (Transaction tx : block.getTransactions()) {
