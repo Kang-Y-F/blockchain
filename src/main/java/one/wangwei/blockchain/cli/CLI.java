@@ -50,6 +50,8 @@ public class CLI {
         Option miner = Option.builder("miner").hasArg(true).desc("Miner wallet address").build();
         Option block = Option.builder("block").hasArg(true).desc("Block hash").build();
         Option txid = Option.builder("txid").hasArg(true).desc("Transaction id").build();
+        Option miner1 = Option.builder("miner1").hasArg(true).desc("Fork branch 1 miner address").build();
+        Option miner2 = Option.builder("miner2").hasArg(true).desc("Fork branch 2 miner address").build();
 
         options.addOption(address);
         options.addOption(sendFrom);
@@ -58,6 +60,9 @@ public class CLI {
         options.addOption(miner);
         options.addOption(block);
         options.addOption(txid);
+        options.addOption(miner1);
+        options.addOption(miner2);
+
 
     }
 
@@ -108,6 +113,17 @@ public class CLI {
                         help();
                     }
                     this.mine(minerAddress);
+                    break;
+
+                case "forktest":
+                    String forkMiner1 = cmd.getOptionValue("miner1");
+                    String forkMiner2 = cmd.getOptionValue("miner2");
+
+                    if (StringUtils.isBlank(forkMiner1) || StringUtils.isBlank(forkMiner2)) {
+                        help();
+                    }
+
+                    this.forkTest(forkMiner1, forkMiner2);
                     break;
 
                 case "verifytx":
@@ -461,6 +477,7 @@ public class CLI {
         System.out.println("  printmempool - Print all pending transactions in mempool");
         System.out.println("  clearmempool - Clear all pending transactions in mempool");
         System.out.println("  verifytx -block BLOCK_HASH -txid TX_ID - Verify transaction existence by Merkle Proof");
+        System.out.println("  forktest -miner1 ADDRESS -miner2 ADDRESS - Simulate fork and longest chain rule");
 
         System.exit(0);
     }
@@ -561,6 +578,145 @@ public class CLI {
         }
     }
 
+    /**
+     * 分叉与最长链规则模拟
+     *
+     * 模拟过程：
+     * 1. 获取当前主链末端作为分叉点；
+     * 2. 在同一个父区块后挖出两个不同分支；
+     * 3. 分支1只挖1个新区块；
+     * 4. 分支2连续挖2个新区块；
+     * 5. 比较两个分支高度；
+     * 6. 将主链切换到更长的分支；
+     * 7. 重建UTXO集合。
+     *
+     * @param miner1 分支1矿工地址
+     * @param miner2 分支2矿工地址
+     * @throws Exception
+     */
+    private void forkTest(String miner1, String miner2) throws Exception {
+        validateWalletAddress(miner1, "miner1");
+        validateWalletAddress(miner2, "miner2");
+
+        Blockchain blockchain = Blockchain.initBlockchainFromDB();
+
+        String forkBaseHash = blockchain.getLastBlockHash();
+        int baseHeight = blockchain.getHeight(forkBaseHash);
+
+        System.out.println("==================================================");
+        System.out.println("Fork And Longest Chain Test");
+        System.out.println("==================================================");
+        System.out.println("Fork Base Hash:  " + forkBaseHash);
+        System.out.println("Base Height:     " + baseHeight);
+
+        /*
+         * 分支1：
+         * forkBase -> branch1Block
+         */
+        Transaction branch1RewardTx = Transaction.newCoinbaseTX(
+                miner1,
+                "Fork branch 1 reward to " + miner1
+        );
+
+        Block branch1Block = blockchain.mineBlockOn(
+                forkBaseHash,
+                new Transaction[]{branch1RewardTx},
+                false
+        );
+
+        int branch1Height = blockchain.getHeight(branch1Block.getHash());
+
+        System.out.println();
+        System.out.println("Branch 1 created:");
+        System.out.println("  Miner:         " + miner1);
+        System.out.println("  Block Hash:    " + branch1Block.getHash());
+        System.out.println("  Prev Hash:     " + branch1Block.getPrevBlockHash());
+        System.out.println("  Height:        " + branch1Height);
+
+        /*
+         * 分支2：
+         * forkBase -> branch2Block1 -> branch2Block2
+         */
+        Transaction branch2RewardTx1 = Transaction.newCoinbaseTX(
+                miner2,
+                "Fork branch 2 block 1 reward to " + miner2
+        );
+
+        Block branch2Block1 = blockchain.mineBlockOn(
+                forkBaseHash,
+                new Transaction[]{branch2RewardTx1},
+                false
+        );
+
+        Transaction branch2RewardTx2 = Transaction.newCoinbaseTX(
+                miner2,
+                "Fork branch 2 block 2 reward to " + miner2
+        );
+
+        Block branch2Block2 = blockchain.mineBlockOn(
+                branch2Block1.getHash(),
+                new Transaction[]{branch2RewardTx2},
+                false
+        );
+
+        int branch2Height = blockchain.getHeight(branch2Block2.getHash());
+
+        System.out.println();
+        System.out.println("Branch 2 created:");
+        System.out.println("  Miner:         " + miner2);
+        System.out.println("  Block 1 Hash:  " + branch2Block1.getHash());
+        System.out.println("  Block 1 Prev:  " + branch2Block1.getPrevBlockHash());
+        System.out.println("  Block 2 Hash:  " + branch2Block2.getHash());
+        System.out.println("  Block 2 Prev:  " + branch2Block2.getPrevBlockHash());
+        System.out.println("  Height:        " + branch2Height);
+
+        System.out.println();
+        System.out.println("Fork detected:");
+        System.out.println("  Branch 1 Height: " + branch1Height);
+        System.out.println("  Branch 2 Height: " + branch2Height);
+
+        if (branch2Height > branch1Height) {
+            blockchain.switchToBlock(branch2Block2.getHash());
+
+            /*
+             * 主链切换后，需要重建UTXO集合。
+             * 因为UTXO集合只应该反映当前主链，而不是所有分叉区块。
+             */
+            new UTXOSet(blockchain).reIndex();
+
+            System.out.println();
+            System.out.println("Longest chain selected.");
+            System.out.println("Main chain switched to Branch 2.");
+            System.out.println("New Main Tip:   " + branch2Block2.getHash());
+            System.out.println("New Height:     " + blockchain.getHeight(branch2Block2.getHash()));
+        } else {
+            blockchain.switchToBlock(branch1Block.getHash());
+            new UTXOSet(blockchain).reIndex();
+
+            System.out.println();
+            System.out.println("Branch 1 selected.");
+            System.out.println("New Main Tip:   " + branch1Block.getHash());
+            System.out.println("New Height:     " + blockchain.getHeight(branch1Block.getHash()));
+        }
+
+        System.out.println();
+        System.out.println("Tip after switch: " + blockchain.getLastBlockHash());
+        System.out.println("Please run printchain to view the selected main chain.");
+    }
+    /**
+     * 校验钱包地址
+     *
+     * @param address 地址
+     * @param name    参数名
+     */
+    private void validateWalletAddress(String address, String name) {
+        try {
+            Base58Check.base58ToBytes(address);
+        } catch (Exception e) {
+            log.error("ERROR: {} address invalid ! address={}", name, address, e);
+            throw new RuntimeException("ERROR: " + name + " address invalid ! address=" + address, e);
+        }
+    }
 
     /**
      * 结构化打印区块
