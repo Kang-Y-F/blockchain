@@ -35,10 +35,23 @@ public class Mempool {
         }
     }
 
+    /**
+     * 添加交易到交易池
+     *
+     * 加入前会检查该交易是否和交易池中已有交易使用了同一个UTXO。
+     * 如果出现相同的 txId:index，说明存在双花风险，直接拒绝加入。
+     *
+     * @param tx
+     */
     public static void addTransaction(Transaction tx) {
         Transaction[] transactions = getTransactions();
 
-        checkDoubleSpend(tx, transactions);
+        String conflictInput = findConflictInput(tx, transactions);
+        if (conflictInput != null) {
+            throw new RuntimeException(
+                    "ERROR: Double spending detected in mempool ! Conflict UTXO=" + conflictInput
+            );
+        }
 
         transactions = ArrayUtils.add(transactions, tx);
         save(transactions);
@@ -65,33 +78,47 @@ public class Mempool {
         }
     }
 
-    private static void checkDoubleSpend(Transaction newTx, Transaction[] pendingTxs) {
+    /**
+     * 查找新交易是否与交易池中的已有交易发生输入冲突
+     *
+     * @param newTx      新交易
+     * @param pendingTxs 交易池中已有交易
+     * @return 如果存在冲突，返回冲突UTXO；否则返回null
+     */
+    public static String findConflictInput(Transaction newTx, Transaction[] pendingTxs) {
         if (newTx == null || newTx.isCoinbase()) {
-            return;
+            return null;
         }
-
+        if (pendingTxs == null || pendingTxs.length == 0) {
+            return null;
+        }
         for (TXInput newInput : newTx.getInputs()) {
             String newInputKey = inputKey(newInput);
-
             for (Transaction pendingTx : pendingTxs) {
                 if (pendingTx == null || pendingTx.isCoinbase()) {
                     continue;
                 }
-
                 for (TXInput pendingInput : pendingTx.getInputs()) {
                     String pendingInputKey = inputKey(pendingInput);
-
                     if (newInputKey.equals(pendingInputKey)) {
-                        throw new RuntimeException(
-                                "ERROR: Double spending detected in mempool ! UTXO=" + newInputKey
-                        );
+                        return newInputKey;
                     }
                 }
             }
         }
+        return null;
     }
 
-    private static String inputKey(TXInput input) {
+    /**
+     * 将交易输入转成 txId:index 的形式
+     *
+     * 例如：
+     * 20d5be1e23d261c96b6084b8e39c4e884c6d6287dceef1d25e1e8e237e5c2ecb:0
+     *
+     * @param input
+     * @return
+     */
+    public static String inputKey(TXInput input) {
         if (input == null || input.getTxId() == null || input.getTxId().length == 0) {
             return "";
         }

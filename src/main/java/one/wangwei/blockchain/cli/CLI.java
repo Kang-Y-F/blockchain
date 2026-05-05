@@ -52,6 +52,8 @@ public class CLI {
         Option txid = Option.builder("txid").hasArg(true).desc("Transaction id").build();
         Option miner1 = Option.builder("miner1").hasArg(true).desc("Fork branch 1 miner address").build();
         Option miner2 = Option.builder("miner2").hasArg(true).desc("Fork branch 2 miner address").build();
+        Option to1 = Option.builder("to1").hasArg(true).desc("Double spend receiver 1").build();
+        Option to2 = Option.builder("to2").hasArg(true).desc("Double spend receiver 2").build();
 
         options.addOption(address);
         options.addOption(sendFrom);
@@ -62,6 +64,8 @@ public class CLI {
         options.addOption(txid);
         options.addOption(miner1);
         options.addOption(miner2);
+        options.addOption(to1);
+        options.addOption(to2);
 
 
     }
@@ -137,6 +141,21 @@ public class CLI {
                     this.verifyTx(blockHash, txId);
                     break;
 
+                case "doubletest":
+                    String doubleFrom = cmd.getOptionValue("from");
+                    String doubleTo1 = cmd.getOptionValue("to1");
+                    String doubleTo2 = cmd.getOptionValue("to2");
+                    String doubleAmount = cmd.getOptionValue("amount");
+
+                    if (StringUtils.isBlank(doubleFrom) ||
+                            StringUtils.isBlank(doubleTo1) ||
+                            StringUtils.isBlank(doubleTo2) ||
+                            !NumberUtils.isDigits(doubleAmount)) {
+                        help();
+                    }
+
+                    this.doubleSpendTest(doubleFrom, doubleTo1, doubleTo2, Integer.valueOf(doubleAmount));
+                    break;
 
                 // 新增：打印交易池
                 case "printmempool":
@@ -478,6 +497,7 @@ public class CLI {
         System.out.println("  clearmempool - Clear all pending transactions in mempool");
         System.out.println("  verifytx -block BLOCK_HASH -txid TX_ID - Verify transaction existence by Merkle Proof");
         System.out.println("  forktest -miner1 ADDRESS -miner2 ADDRESS - Simulate fork and longest chain rule");
+        System.out.println("  doubletest -from FROM -to1 TO1 -to2 TO2 -amount AMOUNT - Simulate and block double spending attack");
 
         System.exit(0);
     }
@@ -703,6 +723,114 @@ public class CLI {
         System.out.println("Tip after switch: " + blockchain.getLastBlockHash());
         System.out.println("Please run printchain to view the selected main chain.");
     }
+
+    /**
+     * 双花攻击演示与拦截
+     *
+     * 模拟过程：
+     * 1. Alice 拥有一个可花费UTXO；
+     * 2. 构造交易1：Alice -> Bob；
+     * 3. 构造交易2：Alice -> Charlie；
+     * 4. 两笔交易都试图引用同一个 txId:index；
+     * 5. 第一笔交易加入Mempool成功；
+     * 6. 第二笔交易加入Mempool时被检测为双花并拒绝。
+     *
+     * @param from   攻击者/付款方地址
+     * @param to1    第一笔交易接收方
+     * @param to2    第二笔交易接收方
+     * @param amount 转账金额
+     * @throws Exception
+     */
+    private void doubleSpendTest(String from, String to1, String to2, int amount) throws Exception {
+        validateWalletAddress(from, "from");
+        validateWalletAddress(to1, "to1");
+        validateWalletAddress(to2, "to2");
+
+        if (amount < 1) {
+            log.error("ERROR: amount invalid ! amount={}", amount);
+            throw new RuntimeException("ERROR: amount invalid ! amount=" + amount);
+        }
+
+        /*
+         * 为了保证双花演示结果清晰，这里先清空交易池。
+         * 否则之前残留的未确认交易可能影响本次演示。
+         */
+        if (!Mempool.isEmpty()) {
+            System.out.println("Mempool is not empty. Clear mempool first for double spending test.");
+            Mempool.clear();
+        }
+
+        Blockchain blockchain = Blockchain.initBlockchainFromDB();
+
+        System.out.println("==================================================");
+        System.out.println("Double Spending Attack Test");
+        System.out.println("==================================================");
+        System.out.println("From:       " + from);
+        System.out.println("To1:        " + to1);
+        System.out.println("To2:        " + to2);
+        System.out.println("Amount:     " + amount);
+        System.out.println();
+
+        /*
+         * 第一笔交易
+         */
+        System.out.println("Step 1: Create transaction 1");
+        System.out.println("  " + from + " -> " + to1 + " : " + amount);
+
+        Transaction tx1 = Transaction.newUTXOTransaction(from, to1, amount, blockchain);
+
+        System.out.println("  TX1 ID: " + Hex.encodeHexString(tx1.getTxId()));
+        System.out.println("  TX1 Inputs:");
+        for (TXInput input : tx1.getInputs()) {
+            System.out.println("    " + Mempool.inputKey(input));
+        }
+
+        Mempool.addTransaction(tx1);
+
+        System.out.println("  Result: TX1 added to mempool successfully.");
+        System.out.println();
+
+        /*
+         * 第二笔交易
+         */
+        System.out.println("Step 2: Create transaction 2");
+        System.out.println("  " + from + " -> " + to2 + " : " + amount);
+
+        Transaction tx2 = Transaction.newUTXOTransaction(from, to2, amount, blockchain);
+
+        System.out.println("  TX2 ID: " + Hex.encodeHexString(tx2.getTxId()));
+        System.out.println("  TX2 Inputs:");
+        for (TXInput input : tx2.getInputs()) {
+            System.out.println("    " + Mempool.inputKey(input));
+        }
+
+        String conflictInput = Mempool.findConflictInput(tx2, Mempool.getTransactions());
+
+        if (conflictInput != null) {
+            System.out.println();
+            System.out.println("Double spending detected before adding TX2!");
+            System.out.println("Conflict UTXO: " + conflictInput);
+        }
+
+        try {
+            Mempool.addTransaction(tx2);
+
+            System.out.println("  Result: TX2 added to mempool.");
+            System.out.println("  Warning: No double spending conflict detected.");
+        } catch (RuntimeException e) {
+            System.out.println("  Result: TX2 rejected by mempool.");
+            System.out.println("  Reason: " + e.getMessage());
+        }
+
+        System.out.println();
+        System.out.println("==================================================");
+        System.out.println("Double Spending Test Result");
+        System.out.println("==================================================");
+        System.out.println("Mempool transactions after test: " + Mempool.getTransactions().length);
+        System.out.println("Only the first transaction should remain in mempool.");
+        System.out.println("Please run printmempool to check pending transactions.");
+    }
+
     /**
      * 校验钱包地址
      *
